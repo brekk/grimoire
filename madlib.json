@@ -1,0 +1,35 @@
+{
+  "name": "garden",
+  "version": "0.0.1",
+  "main": "src/Main.mad",
+  "importAliases": {
+    ".": "src"
+  },
+  "dependencies": [
+    {
+      "minVersion": "0.1.1",
+      "url": "https://github.com/brekk/ensign/archive/refs/tags/v0.1.1.zip",
+      "description": "ensign"
+    },
+    {
+      "minVersion": "0.0.1",
+      "url": "https://github.com/brekk/mad-at-json/archive/refs/tags/v0.0.1.zip",
+      "description": "mad-at-json"
+    },
+    {
+      "minVersion": "0.0.6",
+      "url": "https://github.com/brekk/study/archive/refs/tags/v0.0.6.zip",
+      "description": "Study"
+    },
+    {
+      "minVersion": "0.0.8",
+      "url": "https://github.com/brekk/party-bus/archive/refs/tags/v0.0.8.zip",
+      "description": "PartyBus"
+    },
+    {
+      "minVersion": "3.1.1",
+      "url": "https://github.com/madlib-lang/madserver/archive/refs/tags/v3.1.1.zip",
+      "description": "Madserver"
+    }
+  ]
+}

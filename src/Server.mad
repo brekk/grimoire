@@ -1,0 +1,83 @@
+import type { Response } from "Http"
+import type { Wish } from "Wish"
+
+import type { IncomingRequest } from "MadServer"
+
+import ByteArray from "ByteArray"
+import { Header } from "Http"
+import IO from "IO"
+import List from "List"
+import { Just, Nothing } from "Maybe"
+import Process from "Process"
+import String from "String"
+
+import Server from "MadServer"
+
+
+
+// import { postPlaygroundHandler } from "@server/Api"
+
+
+
+BASE_API_PATH :: String
+BASE_API_PATH = "/api"
+DEFAULT_PORT :: Integer
+DEFAULT_PORT = 3000
+makeApiPath :: String -> String
+makeApiPath = mappend(BASE_API_PATH)
+port :: Integer
+port = pipe(
+  List.nth(1),
+  chain(scan),
+  where {
+    Just(p) =>
+      p
+
+    Nothing =>
+      DEFAULT_PORT
+  },
+)(Process.Argv)
+withSSLOptions :: Server.Options
+withSSLOptions = pipe(
+  map(Process.getEnv),
+  where {
+    [Just(certificateFile), Just(keyFile), caFile] =>
+      {
+        ...Server.DEFAULT_OPTIONS,
+        ssl: Just({ certificateFile, keyFile, caFile, passphrase: Nothing }),
+      }
+
+    _ =>
+      Server.DEFAULT_OPTIONS
+  },
+)(["SSL_CERT", "SSL_KEY", "SSL_CA"])
+CORS_HEADERS = [
+  Header("Access-Control-Allow-Origin", "*"),
+  Header("Access-Control-Allow-Methods", "POST, PUT, GET"),
+  Header("Access-Control-Allow-Headers", "*"),
+  Header("Access-Control-Max-Age", "86400"),
+]
+heyHandler :: IncomingRequest -> Wish (Response ByteArray) (Response ByteArray)
+heyHandler = ({ body }) => pipe(
+  of,
+  chain(
+    (output) => {
+      // IO.pTrace("huh", output)
+      return (
+        of({
+          status: 201,
+          headers: [Header("Content-Type", "application/json"), ...CORS_HEADERS],
+          body: ByteArray.fromString(`{"cool": true}`),
+        })
+      )
+    },
+  ),
+)(body)
+main :: List String -> {}
+main = () => {
+  pipe(
+    Server.create,
+    Server.get("/hey", heyHandler),
+    Server.run(port),
+  )({ ...withSSLOptions, verbose: true })
+}
