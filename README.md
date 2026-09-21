@@ -1,3 +1,3 @@
-# garden
+# grimoire
 
-the madlib package registry: develop a cultivar
+the madlib package registry

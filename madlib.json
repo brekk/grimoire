@@ -1,5 +1,5 @@
 {
-  "name": "garden",
+  "name": "grimoire",
   "version": "0.0.1",
   "main": "src/Main.mad",
   "importAliases": {
