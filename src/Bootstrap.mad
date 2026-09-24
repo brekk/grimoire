@@ -377,16 +377,13 @@ runWave = (registered, pending) => {
     pending,
   )
   packages = List.reduce(accumulatePackages, [], ready)
-  return #[
-    packages,
-    blocked,
-  // runFixedPoint :: Dictionary String Package
-  //   -> List #[TableRow, Maybe Manifest]
-  //   -> Integer
-  //   -> List Package
-  //   -> List Package
-  ]
+  return #[packages, blocked]
 }
+runFixedPoint :: Dictionary String Package
+  -> List #[TableRow, Maybe Manifest]
+  -> Integer
+  -> List Package
+  -> List Package
 runFixedPoint = (registered, pending, waveNo, acc) => {
   #[packages, blocked] = runWave(registered, pending)
 
@@ -422,19 +419,24 @@ readify = pipe(
   Wish.mapRej(Fn.always("can't read")),
   chain(fetchAllManifests),
 )
-main = () => {
+main = (args) => {
   pipe(
-    readify,
-    runFixedPoint({{}}, $, 1, []),
-    Wish.fulfill(
-      (err) => {
-        IO.pTrace("bootstrap failed", err)
-        return {}
-      },
-      (pkgs) => {
-        IO.pTrace("total packages", List.length(pkgs))
-        return {}
-      },
+    List.drop(1),
+    map(
+      pipe(
+        readify,
+        map(runFixedPoint({{}}, $, 1, [])),
+        Wish.fulfill(
+          (err) => {
+            IO.pTrace("bootstrap failed", err)
+            return {}
+          },
+          (pkgs) => {
+            IO.pTrace("total packages", List.length(pkgs))
+            return {}
+          },
+        ),
+      ),
     ),
-  )("./table.md")
+  )(args)
 }
