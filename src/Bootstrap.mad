@@ -1,12 +1,11 @@
 // Bootstrap.mad — one-time fixed-point registrar over the ecosystem table.
 // Reads  ./table.md   (the gist table, verbatim)
 // Writes ./registry/index.json and ./registry/packages/<name>.json
-//
-// Run with: madlib run
 
-import type { Comparison } from "Compare"
+import type { ClientError, Error } from "Http"
 
-import { EQ, GT, LT } from "Compare"
+import type { MadlibDotJson } from "mad-at-json/Parse/MadlibJson"
+
 import Dictionary from "Dictionary"
 import File from "File"
 import Fn from "Function"
@@ -16,21 +15,31 @@ import List from "List"
 import Maybe from "Maybe"
 import { Just, Nothing } from "Maybe"
 import String from "String"
+import Tuple from "Tuple"
 import Wish from "Wish"
 
-// ---- SEAMS to wire against mad-at-json (API names to be confirmed) ----
-// parse :: String -> Maybe JsonValue        (mad-at-json)
-// field :: String -> JsonValue -> Maybe JsonValue
-// getString / getArray / encodeJson :: ...
-// TODO: confirm module name in mad-at-json's madlib.json
+// mad-at-json v0.2.0 public surface (src/Library.mad):
+//   MadAtJson.MadlibDotJson { bin, dependencies :: Maybe (List MadAtJson.Dependency),
+//     main, name, version :: Version.Version }
+//   MadAtJson.parse, MadAtJson.load :: ... -> Wish String MadlibDotJson
+//   MadAtJson.Dependency { description, name, sanitizedUrl, url,
+//     versionRange :: Version.VersionRange } — already parsed, no adapter needed.
 import MadAtJson from "mad-at-json"
+import Version from "mad-at-json/Version"
 
 
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+massageHTTPErrorIntoString :: Error String -> String
+massageHTTPErrorIntoString = where {
+  Http.BadResponse({ body, status }) =>
+    `{status}:${body}`
 
+  Http.ClientError(Http.BadUrl(url)) =>
+    url
+
+  Http.ClientError(r) =>
+    show(r)
+}
 alias TableRow = {
   deprecatedBy :: Maybe String,
   description :: String,
@@ -43,20 +52,19 @@ alias TableRow = {
   tag :: Maybe String,
   version :: String,
 }
-alias Dependency = { description :: Maybe String, minVersion :: Maybe String, url :: String }
 alias Manifest = {
   bin :: Maybe String,
-  dependencies :: List Dependency,
+  dependencies :: List MadAtJson.Dependency,
   main :: String,
   name :: String,
-  version :: String,
+  version :: Version.Version,
 }
 type PinType = TagPin | BranchPin | LocalPin | UnresolvedPin
 alias ResolvedDep = {
   pinType :: PinType,
   rawUrl :: String,
   targetName :: String,
-  versionRange :: Maybe String,
+  versionRange :: Version.VersionRange,
 }
 alias Package = {
   dependencies :: List ResolvedDep,
@@ -66,7 +74,7 @@ alias Package = {
   isBinding :: Boolean,
   latestTag :: String,
   latestUrl :: String,
-  latestVersion :: String,
+  latestVersion :: Version.Version,
   name :: String,
   owner :: String,
   publishedAt :: String,
@@ -84,7 +92,6 @@ type BlockReason
 
 linkTarget :: String -> Maybe String
 linkTarget = (cell) => where(String.split("]", cell)) {
-  // "[study](https://github.com/brekk/study)"
   [_, rest, ..._] =>
     where(String.split(")", rest)) {
       [url, ..._] =>
@@ -97,19 +104,27 @@ linkTarget = (cell) => where(String.split("]", cell)) {
   _ =>
     Nothing
 }
-// "| [study](https://github.com/brekk/study) | brekk | ... |"
+isWhitespace :: String -> Boolean
+isWhitespace = pipe(
+  String.trim,
+  String.isEmpty,
+)
+unquote :: String -> String
+unquote = pipe(
+  String.dropLast(1),
+  String.drop(1),
+  String.trim,
+)
 parseRow :: String -> Maybe TableRow
 parseRow = pipe(
   String.split("|"),
   where {
-    // leading "" cell, then 10 cells, trailing ""
     [_, nameCell, owner, description, versionCell, date, _deps, exeCell, bindCell, depNote, ..._] =>
       do {
         url = linkTarget(nameCell)
         return where(url) {
           Just(u) =>
             where(String.split("/", u)) {
-              // https: "" github.com owner repo
               [_, _, _, owner2, repo] =>
                 do {
                   releaseUrl = linkTarget(versionCell)
@@ -118,13 +133,16 @@ parseRow = pipe(
                     owner: owner2,
                     repository: u,
                     description: String.trim(description),
-                    version: String.trim(String.drop(1, String.dropLast(1, versionCell))),
+                    version: unquote(versionCell),
                     tag: map(
-                      (_v) => "v" ++ String.trim(String.drop(1, String.dropLast(1, versionCell))),
+                      pipe(
+                        unquote,
+                        mappend("v"),
+                      ),
                     )(releaseUrl),
                     publishedAt: String.trim(date),
-                    executable: String.trim(exeCell) != "",
-                    isBinding: String.trim(bindCell) != "",
+                    executable: isWhitespace(exeCell),
+                    isBinding: isWhitespace(bindCell),
                     deprecatedBy: where(String.trim(depNote)) {
                       t =>
                         t == "" ? Nothing : linkTarget(depNote)
@@ -145,6 +163,10 @@ parseRow = pipe(
       Nothing
   },
 )
+box = (x) => [
+  // parseTable :: String -> List (Maybe TableRow)
+  x,
+]
 parseTable :: String -> List TableRow
 parseTable = pipe(
   String.split("\n"),
@@ -156,23 +178,16 @@ parseTable = pipe(
     ),
   ),
   map(parseRow),
-  List.filter(
-    where {
-      Just(_) =>
-        true
+  List.filter(Maybe.isJust),
+  List.reduce(
+    (acc, x) => where(x) {
+      Just(y) =>
+        List.append(y, acc)
 
       _ =>
-        false
+        acc
     },
-  ),
-  map(
-    where {
-      Just(row) =>
-        row
-
-      _ =>
-        ???
-    },
+    [],
   ),
 )
 // ---------------------------------------------------------------------------
@@ -187,10 +202,27 @@ manifestUrl = (row) => where(row.tag) {
   Nothing =>
     ""
 }
-// TODO: bind the three decode helpers to mad-at-json's real API
-decodeManifest :: String -> Maybe Manifest
-decodeManifest = (_raw) => Nothing
-// the row rides along with its manifest, so no re-pairing pass is needed
+// I didn't know this was a valid type construct, that's useful
+adaptManifest :: MadAtJson.MadlibDotJson -> Manifest
+adaptManifest = (x) => {
+  { bin, dependencies, name, version } = x
+  // return { bin, dependencies: Maybe.fromMaybe([], dependencies), main: x.main, name, version }
+  return { bin, dependencies: Maybe.fromMaybe([], dependencies), main: x.main, name, version }
+}
+// parse failures fold to Nothing; MadAtJson.parse is plain Wish String, not
+// Validate-wrapped, in v0.2.0 — nothing to distinguish (yet) between a soft
+// warning and a hard error at this seam.
+decodeManifest :: String -> Wish x (Maybe Manifest)
+decodeManifest = pipe(
+  MadAtJson.parse,
+  map(
+    pipe(
+      adaptManifest,
+      Just,
+    ),
+  ),
+  Wish.chainRej((_) => Wish.good(Nothing)),
+)
 fetchManifest :: TableRow -> Wish (Http.Error String) #[TableRow, Maybe Manifest]
 fetchManifest = (row) => where(row.tag) {
   Nothing =>
@@ -198,10 +230,9 @@ fetchManifest = (row) => where(row.tag) {
 
   Just(_) =>
     chain(
-      (response) => Wish.good(#[
-        row,
-        response.status == Http.OK ? decodeManifest(response.body) : Nothing,
-      ]),
+      ({ status, body }) => status == Http.OK
+        ? map((manifest) => #[row, manifest])(decodeManifest(body))
+        : Wish.good(#[row, Nothing]),
     )(
       pipe(
         manifestUrl,
@@ -209,74 +240,71 @@ fetchManifest = (row) => where(row.tag) {
       )(row),
     )
 }
-fetchAllManifests :: List TableRow -> Wish (Http.Error String) (List #[TableRow, Maybe Manifest])
+fetchAllManifests :: List TableRow -> Wish String (List #[TableRow, Maybe Manifest])
 fetchAllManifests = pipe(
   map(fetchManifest),
   Wish.parallel,
+  Wish.mapRej(massageHTTPErrorIntoString),
 )
-// ---------------------------------------------------------------------------
-// Dependency classification
-// ---------------------------------------------------------------------------
-
-classifyPin :: String -> PinType
-classifyPin = (url) => String.contains("/archive/refs/tags/", url)
+alias ClassifiedPath = { branchPath :: String, localPath :: String, tagPath :: String }
+classifyPinWithConfig :: ClassifiedPath -> String -> PinType
+classifyPinWithConfig = ({ tagPath, branchPath, localPath }, url) => String.contains(tagPath, url)
   ? TagPin
-  : String.contains("/archive/refs/heads/", url)
+  : String.contains(branchPath, url)
     ? BranchPin
-    : String.startsWith("file://", url) ? LocalPin : UnresolvedPin
-// https://github.com/brekk/study/archive/refs/tags/v0.0.7.zip -> "study"
+    : String.startsWith(localPath, url) ? LocalPin : UnresolvedPin
+classifyPin :: String -> PinType
+classifyPin = classifyPinWithConfig({
+  tagPath: "/archive/refs/tags/",
+  branchPath: "/archive/refs/heads/",
+  localPath: "file://",
+})
 repoNameFromUrl :: String -> Maybe String
-repoNameFromUrl = (url) => where(String.split("/", url)) {
-  [_, _, _, _owner, repo, ..._] =>
-    Just(repo)
+repoNameFromUrl = pipe(
+  String.split("/"),
+  where {
+    [_, _, _, _owner, repo, ..._] =>
+      Just(repo)
 
-  _ =>
-    Nothing
-}
-resolveDeps :: List Dependency -> List ResolvedDep
-resolveDeps = (deps) => map(
-  (dep) => where(repoNameFromUrl(dep.url)) {
-    Just(target) =>
-      {
-        targetName: target,
-        rawUrl: dep.url,
-        versionRange: dep.minVersion,
-        pinType: classifyPin(dep.url),
-      }
-
-    Nothing =>
-      { targetName: "", rawUrl: dep.url, versionRange: dep.minVersion, pinType: UnresolvedPin }
+    _ =>
+      Nothing
   },
-)(deps)
+)
+resolveDep :: MadAtJson.Dependency -> ResolvedDep
+resolveDep = ({ url, versionRange }) => (
+  {
+    targetName: Maybe.fromMaybe("", repoNameFromUrl(url)),
+    rawUrl: url,
+    versionRange,
+    pinType: repoNameFromUrl(url) == Nothing ? UnresolvedPin : classifyPin(url),
+  }
+)
+resolveDeps :: List MadAtJson.Dependency -> List ResolvedDep
+resolveDeps = map(resolveDep)
 // ---------------------------------------------------------------------------
 // The fixed point
 // ---------------------------------------------------------------------------
 
 depSatisfied :: Dictionary String Package -> ResolvedDep -> Maybe BlockReason
-depSatisfied = (registered, dep) => where(dep.pinType) {
+depSatisfied = (registered, { pinType, targetName, versionRange }) => where(pinType) {
   BranchPin =>
-    Just(BranchPinnedDep(dep.targetName))
+    Just(BranchPinnedDep(targetName))
 
   LocalPin =>
-    Just(LocalDep(dep.targetName))
+    Just(LocalDep(targetName))
 
   UnresolvedPin =>
-    Just(DepNotRegistered(dep.targetName))
+    Just(DepNotRegistered(targetName))
 
   TagPin =>
-    where(Dictionary.get(dep.targetName, registered)) {
+    where(Dictionary.get(targetName, registered)) {
       Nothing =>
-        Just(DepNotRegistered(dep.targetName))
+        Just(DepNotRegistered(targetName))
 
       Just(target) =>
-        where(dep.versionRange) {
-          Nothing =>
-            Nothing
-
-          // version too old: treat as blocked, not registered
-          Just(minV) =>
-            target.latestVersion < minV ? Just(DepNotRegistered(dep.targetName)) : Nothing
-        }
+        Version.withinRange(versionRange, target.latestVersion)
+          ? Nothing
+          : Just(DepNotRegistered(targetName))
     }
 }
 rowBlockReason :: Dictionary String Package -> #[TableRow, Maybe Manifest] -> Maybe BlockReason
@@ -288,10 +316,10 @@ rowBlockReason = (registered, #[row, manifest]) => where(#[row.tag, manifest]) {
     Just(ManifestFetchFailed)
 
   #[Just(_), Just(m)] =>
-    List.reduce(
-      // first blocking reason wins
-      (acc, reason) => acc ?? reason,
-      Nothing,
+    pipe(
+      .dependencies,
+      resolveDeps,
+      map(depSatisfied(registered)),
       List.filter(
         where {
           Just(_) =>
@@ -300,11 +328,36 @@ rowBlockReason = (registered, #[row, manifest]) => where(#[row.tag, manifest]) {
           _ =>
             false
         },
-        map(depSatisfied(registered), resolveDeps(m.dependencies)),
       ),
-    )
+      List.reduce((acc, reason) => !Maybe.isJust(acc) ? reason : acc, Nothing),
+    )(m)
 }
-// one wave: everything currently satisfiable registers together
+accumulatePackages = (acc, pendx) => where(pendx) {
+  #[
+    { name, owner, repository, description, version, tag, publishedAt, isBinding, deprecatedBy },
+    Just(manifest),
+  ] =>
+    List.append(
+      {
+        name: manifest.name,
+        owner,
+        repository,
+        description,
+        latestVersion: manifest.version,
+        latestTag: tag ?? "",
+        latestUrl: `https://github.com/${owner}/${name}/archive/refs/tags/${tag ?? ""}.zip`,
+        publishedAt,
+        executable: manifest.bin != Nothing,
+        isBinding,
+        deprecatedBy,
+        dependencies: resolveDeps(manifest.dependencies),
+      },
+      acc,
+    )
+
+  #[_, Nothing] =>
+    acc
+}
 runWave :: Dictionary String Package
   -> List #[TableRow, Maybe Manifest]
   -> #[List Package, List #[TableRow, Maybe Manifest]]
@@ -323,47 +376,17 @@ runWave = (registered, pending) => {
     },
     pending,
   )
-  packages = map(
-    where {
-      #[row, Just(m)] =>
-        {
-          // manifest name is the registry key
-          name: m.name,
-          owner: row.owner,
-          repository: row.repository,
-          description: row.description,
-          latestVersion: m.version,
-          latestTag: row.tag ?? "",
-          latestUrl: `https://github.com/${row.owner}/${row.name}/archive/refs/tags/${
-            row.tag ?? ""
-          }.zip`,
-          publishedAt: row.publishedAt,
-          // bin field is the executable signal
-          executable: m.bin != Nothing,
-          isBinding: row.isBinding,
-          deprecatedBy: row.deprecatedBy,
-          dependencies: resolveDeps(m.dependencies),
-        }
-
-      // unreachable: `ready` was filtered on rowBlockReason == Nothing,
-      // which requires the manifest to be Just — the typed hole is the
-      // tripwire if that invariant ever breaks
-      _ =>
-        ???
-    },
-    ready,
-  )
+  packages = List.reduce(accumulatePackages, [], ready)
   return #[
     packages,
     blocked,
-  // drive waves to a fixed point; emits the wave number as it goes
+  // runFixedPoint :: Dictionary String Package
+  //   -> List #[TableRow, Maybe Manifest]
+  //   -> Integer
+  //   -> List Package
+  //   -> List Package
   ]
 }
-runFixedPoint :: Dictionary String Package
-  -> List #[TableRow, Maybe Manifest]
-  -> Integer
-  -> List Package
-  -> List Package
 runFixedPoint = (registered, pending, waveNo, acc) => {
   #[packages, blocked] = runWave(registered, pending)
 
@@ -382,33 +405,36 @@ runFixedPoint = (registered, pending, waveNo, acc) => {
       registered,
       packages,
     )
-    return runFixedPoint(newlyRegistered, blocked, waveNo + 1, List.append(acc, packages))
+    return pipe(
+      List.concat(acc),
+      runFixedPoint(newlyRegistered, blocked, waveNo + 1),
+    )(packages)
   }
 }
-// ---------------------------------------------------------------------------
-// Emission — TODO: encodePackage / encodeIndex via mad-at-json, then:
-//   File.write("registry/packages/" ++ pkg.name ++ ".json", encodePackage(pkg))
-//   File.write("registry/index.json", encodeIndex(alphabetical packages))
-// ---------------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-main = () => Wish.fulfill(
-  (err) => {
-    IO.pTrace("bootstrap failed", err)
-    return {}
-  },
-  (paired) => {
-    IO.pTrace("parsed rows", List.length(paired))
-    packages = runFixedPoint({{}}, paired, 1, [])
-    IO.pTrace("registered packages", List.length(packages))
-    return {}
-  },
-  pipe(
-    File.read,
-    map(parseTable),
-    chain(fetchAllManifests),
-  )("./table.md"),
+// readify :: String -> Wish String (List #[TableRow, Maybe MadlibDotJson])
+readify = pipe(
+  File.read,
+  map(parseTable),
+  Wish.mapRej(Fn.always("can't read")),
+  chain(fetchAllManifests),
 )
+main = () => {
+  pipe(
+    readify,
+    runFixedPoint({{}}, $, 1, []),
+    Wish.fulfill(
+      (err) => {
+        IO.pTrace("bootstrap failed", err)
+        return {}
+      },
+      (pkgs) => {
+        IO.pTrace("total packages", List.length(pkgs))
+        return {}
+      },
+    ),
+  )("./table.md")
+}
