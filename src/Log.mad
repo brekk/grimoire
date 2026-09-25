@@ -1,0 +1,32 @@
+/* ★★★ grimoire@0.0.1 ★★★
+ * THIS FILE AUTOMATICALLY GENERATED FROM SOURCE: grimoire.clown-car
+ */
+
+import Party from "PartyBus"
+
+
+
+export tags = {
+  grimoire: Party.tag("grimoire"),
+  bootstrap: Party.tagWithScope("grimoire", ["bootstrap"]),
+  bootstrapDetail: Party.tagWithScope("grimoire", ["bootstrap", "detail"]),
+  bootstrapParse: Party.tagWithScope("grimoire", ["bootstrap", "parse"]),
+  bootstrapManifest: Party.tagWithScope("grimoire", ["bootstrap", "manifest"]),
+  database: Party.tagWithScope("grimoire", ["database"]),
+}
+export env = {
+  grimoire: Party.env(tags.grimoire),
+  bootstrap: Party.env(tags.bootstrap),
+  bootstrapDetail: Party.env(tags.bootstrapDetail),
+  bootstrapParse: Party.env(tags.bootstrapParse),
+  bootstrapManifest: Party.env(tags.bootstrapManifest),
+  database: Party.env(tags.database),
+}
+export tapped = {
+  grimoire: Party.tap(env.grimoire),
+  bootstrap: Party.tap(env.bootstrap),
+  bootstrapDetail: Party.tap(env.bootstrapDetail),
+  bootstrapParse: Party.tap(env.bootstrapParse),
+  bootstrapManifest: Party.tap(env.bootstrapManifest),
+  database: Party.tap(env.database),
+}

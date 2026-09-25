@@ -1,0 +1,25 @@
+{
+  "name": "spirit-gum",
+  "version": "0.2.5",
+  "main": "src/SpiritGum.mad",
+  "importAliases": {
+    ".": "src"
+  },
+  "dependencies": [
+    {
+      "minVersion": "0.0.9",
+      "url": "https://github.com/brekk/mad-at-json/archive/refs/tags/v0.0.9.zip",
+      "description": "mad-at-json"
+    },
+    {
+      "minVersion": "0.0.7",
+      "url": "https://github.com/brekk/study/archive/refs/tags/v0.0.7.zip",
+      "description": "Study"
+    },
+    {
+      "minVersion": "0.3.1",
+      "url": "https://github.com/brekk/party-bus/archive/refs/tags/v0.3.1.zip",
+      "description": "PartyBus"
+    }
+  ]
+}

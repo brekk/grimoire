@@ -26,6 +26,9 @@ import Wish from "Wish"
 //     versionRange :: Version.VersionRange } — already parsed, no adapter needed.
 import MadAtJson from "mad-at-json"
 import Version from "mad-at-json/Version"
+import Shroud from "shroud"
+
+import Log from "@/Log"
 
 
 
@@ -45,6 +48,7 @@ alias TableRow = {
   description :: String,
   executable :: Boolean,
   isBinding :: Boolean,
+  isPublished :: Boolean,
   name :: String,
   owner :: String,
   publishedAt :: String,
@@ -89,21 +93,53 @@ type BlockReason
 // ---------------------------------------------------------------------------
 // Table parsing (the gist, as markdown)
 // ---------------------------------------------------------------------------
-
+JOINER = "]("
+hasLinkJoiner = String.contains(JOINER)
 linkTarget :: String -> Maybe String
-linkTarget = (cell) => where(String.split("]", cell)) {
-  [_, rest, ..._] =>
-    where(String.split(")", rest)) {
-      [url, ..._] =>
-        Just(url)
+linkTarget = (cell) => Fn.ifElse(
+  hasLinkJoiner,
+  pipe(
+    String.split(JOINER),
+    where {
+      [_, rest] =>
+        pipe(
+          String.trim,
+          Fn.when(String.endsWith(")"), String.dropLast(1)),
+          String.trim,
+          Just,
+        )(rest)
 
       _ =>
         Nothing
-    }
+    },
+  ),
+  pipe(
+    String.trim,
+    Just,
+  ),
+)(cell)
+linkText :: String -> Maybe String
+linkText = Fn.ifElse(
+  hasLinkJoiner,
+  pipe(
+    String.drop(1),
+    String.split(JOINER),
+    where {
+      [rest] =>
+        pipe(
+          Fn.when(String.endsWith(")"), String.dropLast(1)),
+          Just,
+        )(rest)
 
-  _ =>
-    Nothing
-}
+      _ =>
+        Nothing
+    },
+  ),
+  pipe(
+    String.trim,
+    Just,
+  ),
+)
 isWhitespace :: String -> Boolean
 isWhitespace = pipe(
   String.trim,
@@ -118,28 +154,34 @@ unquote = pipe(
 parseRow :: String -> Maybe TableRow
 parseRow = pipe(
   String.split("|"),
+  map(String.trim),
   where {
     [_, nameCell, owner, description, versionCell, date, _deps, exeCell, bindCell, depNote, ..._] =>
       do {
         url = linkTarget(nameCell)
+        isPublished = hasLinkJoiner(versionCell)
+        stripInitVersion = (v) => !isPublished ? "" : v
         return where(url) {
           Just(u) =>
             where(String.split("/", u)) {
-              [_, _, _, owner2, repo] =>
+              [_, _, _, _, repo] =>
                 do {
-                  releaseUrl = linkTarget(versionCell)
                   return Just({
                     name: repo,
-                    owner: owner2,
+                    owner,
                     repository: u,
-                    description: String.trim(description),
-                    version: unquote(versionCell),
-                    tag: map(
-                      pipe(
-                        unquote,
-                        mappend("v"),
-                      ),
-                    )(releaseUrl),
+                    isPublished,
+                    description,
+                    version: pipe(
+                      String.split("/v"),
+                      List.last,
+                      Maybe.fromMaybe("?.?.?"),
+                      stripInitVersion,
+                    )(linkTarget(versionCell) ?? "/v?.?.?"),
+                    tag: pipe(
+                      linkTarget,
+                      map(stripInitVersion),
+                    )(versionCell),
                     publishedAt: String.trim(date),
                     executable: isWhitespace(exeCell),
                     isBinding: isWhitespace(bindCell),
@@ -178,7 +220,6 @@ parseTable = pipe(
     ),
   ),
   map(parseRow),
-  List.filter(Maybe.isJust),
   List.reduce(
     (acc, x) => where(x) {
       Just(y) =>
@@ -193,7 +234,7 @@ parseTable = pipe(
 // ---------------------------------------------------------------------------
 // Manifest fetching (raw.githubusercontent at the release tag)
 // ---------------------------------------------------------------------------
-
+/*
 manifestUrl :: TableRow -> String
 manifestUrl = (row) => where(row.tag) {
   Just(tag) =>
@@ -202,6 +243,54 @@ manifestUrl = (row) => where(row.tag) {
   Nothing =>
     ""
 }
+
+manifestUrl :: TableRow -> Wish String MadAtJson.MadlibDotJson
+manifestUrl = (row) => where(row.tag) {
+  Just(tag) =>
+    pipe(
+      Shroud.walk("gh"),
+      Wish.mapRej(.stderr),
+      map(.stdout),
+      chain(MadAtJson.parse),
+    )([
+      "api",
+      "-H",
+      `"Accept: application/vnd.github+json"`,
+      "-H",
+      `"X-GitHub-Api-Version: 2026-03-10"`,
+      `/repos/${row.owner}/${row.name}/releases`,
+    ])
+
+  Nothing =>
+    Wish.bad("No tag")
+}
+*/
+
+manifestUrl :: TableRow -> Wish String MadAtJson.MadlibDotJson
+manifestUrl = (row) => pipe(
+  .tag,
+  where {
+    Just(tag) =>
+      pipe(
+        Log.env.bootstrap("ARGS"),
+        Shroud.execute("fetch"),
+        map(Log.env.bootstrapDetail("processed?")),
+        Wish.mapRej(.stderr),
+        map(.stdout),
+        // we need to break this up, as the above might write to /packages but isn't yet parseable
+        // chain(MadAtJson.parse),
+        Fn.always(Wish.bad("TEMPORARY INSANITY")),
+      )([
+        `--repo="https://github.com/${row.owner}/${row.name}"`,
+        `--ref="v${row.version}"`,
+        `--source-path="/madlib.json"`,
+        `./packages/` ++ row.owner ++ "-" ++ row.name ++ "-" ++ row.version ++ "-madlib.json",
+      ])
+
+    Nothing =>
+      Wish.bad("Unable to load")
+  },
+)(row)
 // I didn't know this was a valid type construct, that's useful
 adaptManifest :: MadAtJson.MadlibDotJson -> Manifest
 adaptManifest = (x) => {
@@ -223,28 +312,22 @@ decodeManifest = pipe(
   ),
   Wish.chainRej((_) => Wish.good(Nothing)),
 )
-fetchManifest :: TableRow -> Wish (Http.Error String) #[TableRow, Maybe Manifest]
+fetchManifest :: TableRow -> Wish String #[TableRow, Maybe Manifest]
 fetchManifest = (row) => where(row.tag) {
   Nothing =>
     Wish.good(#[row, Nothing])
 
   Just(_) =>
-    chain(
-      ({ status, body }) => status == Http.OK
-        ? map((manifest) => #[row, manifest])(decodeManifest(body))
-        : Wish.good(#[row, Nothing]),
-    )(
-      pipe(
-        manifestUrl,
-        Http.get,
-      )(row),
-    )
+    pipe(
+      manifestUrl,
+      map((x) => #[row, Just(adaptManifest(x))]),
+    )(row)
 }
 fetchAllManifests :: List TableRow -> Wish String (List #[TableRow, Maybe Manifest])
 fetchAllManifests = pipe(
+  List.filter(.isPublished),
   map(fetchManifest),
   Wish.parallel,
-  Wish.mapRej(massageHTTPErrorIntoString),
 )
 alias ClassifiedPath = { branchPath :: String, localPath :: String, tagPath :: String }
 classifyPinWithConfig :: ClassifiedPath -> String -> PinType
@@ -391,7 +474,7 @@ runFixedPoint = (registered, pending, waveNo, acc) => {
     map(
       where {
         #[row, m] =>
-          IO.pTrace("blocked", `${row.name} (${show(rowBlockReason(registered, #[row, m]))})`)
+          Log.env.bootstrap("blocked: " ++ row.name, rowBlockReason(registered, #[row, m]))
       },
     )(pending)
     return acc
@@ -417,6 +500,7 @@ readify = pipe(
   File.read,
   map(parseTable),
   Wish.mapRej(Fn.always("can't read")),
+  map(Log.env.bootstrapDetail("yeetail")),
   chain(fetchAllManifests),
 )
 main = (args) => {
